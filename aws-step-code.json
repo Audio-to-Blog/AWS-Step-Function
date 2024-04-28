@@ -1,0 +1,133 @@
+{
+    "Comment": "A description of my state machine",
+    "StartAt": "LogStart",
+    "States": {
+      "LogStart": {
+        "Type": "Pass",
+        "Result": {
+          "TranscriptionJobName.$": "$$.Execution.Name"
+        },
+        "Next": "StartTranscriptionJob"
+      },
+      "StartTranscriptionJob": {
+        "Type": "Task",
+        "Parameters": {
+          "Media": {
+            "MediaFileUri.$": "$$.Execution.Input.filename"
+          },
+          "TranscriptionJobName.$": "$$.Execution.Name",
+          "LanguageCode": "en-US",
+          "OutputBucketName": "output-ids721",
+          "Settings": {
+            "ChannelIdentification": false,
+            "MaxSpeakerLabels": 2,
+            "ShowSpeakerLabels": true
+          }
+        },
+        "Resource": "arn:aws:states:::aws-sdk:transcribe:startTranscriptionJob",
+        "Next": "WaitForCompletion"
+      },
+      "WaitForCompletion": {
+        "Type": "Wait",
+        "Seconds": 0,
+        "Next": "GetTranscriptionJob"
+      },
+      "GetTranscriptionJob": {
+        "Type": "Task",
+        "Parameters": {
+          "TranscriptionJobName.$": "$$.Execution.Name"
+        },
+        "Resource": "arn:aws:states:::aws-sdk:transcribe:getTranscriptionJob",
+        "ResultPath": "$.TranscriptionJob",
+        "Next": "CheckJobStatus"
+      },
+      "CheckJobStatus": {
+        "Type": "Choice",
+        "Choices": [
+          {
+            "Variable": "$.TranscriptionJob.TranscriptionJob.TranscriptionJobStatus",
+            "StringEquals": "IN_PROGRESS",
+            "Next": "retryingwait"
+          },
+          {
+            "Variable": "$.TranscriptionJob.TranscriptionJob.TranscriptionJobStatus",
+            "StringEquals": "COMPLETED",
+            "Next": "ProcessTranscription"
+          }
+        ],
+        "Default": "retryingwait"
+      },
+      "retryingwait": {
+        "Type": "Pass",
+        "Result": {},
+        "Next": "WaitForCompletion"
+      },
+      "ProcessTranscription": {
+        "Type": "Pass",
+        "Result": {
+          "Message": "Transcription job completed successfully"
+        },
+        "ResultPath": "$.ProcessTranscriptionOutput",
+        "Next": "Clean up transcript"
+      },
+      "Clean up transcript": {
+        "Type": "Task",
+        "Resource": "arn:aws:states:::lambda:invoke",
+        "Parameters": {
+          "FunctionName": "arn:aws:lambda:us-east-1:718203338152:function:condense-json-transcript:$LATEST",
+          "Payload": {
+            "bucket": "output-ids721",
+            "key.$": "States.Format('{}{}', $$.Execution.Name, '.json')"
+          }
+        },
+        "Retry": [
+          {
+            "ErrorEquals": [
+              "Lambda.ServiceException",
+              "Lambda.AWSLambdaException",
+              "Lambda.SdkClientException",
+              "Lambda.TooManyRequestsException"
+            ],
+            "IntervalSeconds": 1,
+            "MaxAttempts": 3,
+            "BackoffRate": 2
+          }
+        ],
+        "Next": "GetObject",
+        "ResultSelector": {
+          "new-transcript-key.$": "$.Payload.new_transcript_key"
+        }
+      },
+      "GetObject": {
+        "Type": "Task",
+        "Next": "PrepareInput",
+        "Parameters": {
+          "Bucket": "output-ids721",
+          "Key.$": "$.new-transcript-key"
+        },
+        "Resource": "arn:aws:states:::aws-sdk:s3:getObject",
+        "ResultSelector": {
+          "Body.$": "$.Body"
+        }
+      },
+      "PrepareInput": {
+        "Type": "Pass",
+        "Parameters": {
+          "ModelInput.$": "States.Format('Use this transcript of a conversation to creat a blog post. Pay attention to which speaker is speaking. The context is one person meeting another person and asking questions. The results should blog post/ linkedin artcile that talks about that person 1 learned when meeting the new person. Sound like a journalist / linkedin article writer. {}', States.JsonToString($.Body))"
+        },
+        "Next": "Bedrock InvokeModel"
+      },
+      "Bedrock InvokeModel": {
+        "Type": "Task",
+        "Resource": "arn:aws:states:::bedrock:invokeModel",
+        "Parameters": {
+          "ModelId": "meta.llama3-70b-instruct-v1:0",
+          "Body": {
+            "prompt.$": "$.ModelInput",
+            "max_gen_len": 2048
+          }
+        },
+        "End": true
+      }
+    }
+  }
